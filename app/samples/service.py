@@ -67,6 +67,22 @@ class SampleLifecycleService:
         self.audit.record(principal, "batch.receive", "receipt_batch", str(batch["id"]), after=batch)
         return batch
 
+    def close_batch(self, principal: Principal, batch_id: int) -> dict[str, Any]:
+        principal.require("samples.write")
+        batch = self.batches.get(batch_id)
+        if batch["status"] == "closed":
+            raise ConflictError("批次已经关闭")
+        if batch["status"] == "quarantined":
+            raise ConflictError("隔离批次不能直接关闭")
+        now = to_storage(self.clock.now())
+        self.connection.execute(
+            "UPDATE receipt_batches SET status='closed',updated_at=? WHERE id=?",
+            (now, batch_id),
+        )
+        updated = self.batches.get(batch_id)
+        self.audit.record(principal, "batch.close", "receipt_batch", str(batch_id), before=batch, after=updated)
+        return updated
+
     def register_sample(self, principal: Principal, data: dict[str, Any]) -> dict[str, Any]:
         principal.require("samples.write")
         if self.samples.by_code(data["sample_code"]):

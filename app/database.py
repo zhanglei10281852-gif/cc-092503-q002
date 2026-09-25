@@ -335,6 +335,77 @@ CREATE TABLE IF NOT EXISTS sample_events (
     occurred_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sample_events_sample ON sample_events(sample_id, id);
+
+CREATE TABLE IF NOT EXISTS handoff_credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_code TEXT NOT NULL UNIQUE,
+    batch_id INTEGER NOT NULL REFERENCES receipt_batches(id),
+    handoff_party TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    key_digest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','rotated','revoked')),
+    issued_by INTEGER NOT NULL REFERENCES users(id),
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    rotated_at TEXT,
+    revoked_at TEXT,
+    revoked_by INTEGER REFERENCES users(id),
+    revoke_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(batch_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_handoff_cred_batch ON handoff_credentials(batch_id);
+
+CREATE TABLE IF NOT EXISTS handoff_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_code TEXT NOT NULL UNIQUE,
+    credential_id INTEGER NOT NULL REFERENCES handoff_credentials(id),
+    credential_version INTEGER NOT NULL,
+    batch_id INTEGER NOT NULL REFERENCES receipt_batches(id),
+    handoff_party TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    expected_count INTEGER NOT NULL CHECK(expected_count > 0),
+    accepted_count INTEGER NOT NULL DEFAULT 0,
+    rejected_count INTEGER NOT NULL DEFAULT 0,
+    received_by INTEGER NOT NULL REFERENCES users(id),
+    received_at TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_receipt_credential_success
+    ON handoff_receipts(credential_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_receipt_batch_idempotency
+    ON handoff_receipts(batch_id, idempotency_key);
+
+CREATE TABLE IF NOT EXISTS handoff_receipt_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_id INTEGER NOT NULL REFERENCES handoff_receipts(id) ON DELETE CASCADE,
+    line_no INTEGER NOT NULL,
+    sample_code TEXT NOT NULL,
+    accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),
+    quantity REAL,
+    unit TEXT,
+    reject_reason TEXT,
+    location_id INTEGER REFERENCES storage_locations(id),
+    sample_id INTEGER REFERENCES samples(id),
+    UNIQUE(receipt_id, line_no),
+    UNIQUE(receipt_id, sample_code)
+);
+
+CREATE TABLE IF NOT EXISTS handoff_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER NOT NULL REFERENCES handoff_credentials(id),
+    batch_id INTEGER NOT NULL REFERENCES receipt_batches(id),
+    receipt_id INTEGER REFERENCES handoff_receipts(id),
+    actor_user_id INTEGER REFERENCES users(id),
+    event_type TEXT NOT NULL,
+    result TEXT NOT NULL CHECK(result IN ('success','replayed','denied','failure')),
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoff_events_cred ON handoff_events(credential_id, id);
+CREATE INDEX IF NOT EXISTS idx_handoff_events_batch ON handoff_events(batch_id, id);
 """
 
 PERMISSIONS = [
@@ -353,6 +424,10 @@ PERMISSIONS = [
     ("approvals.decide", "审批高风险操作", "approvals", "decide"),
     ("locations.read_sensitive", "查看精确保管位置", "locations", "read_sensitive"),
     ("anomalies.manage", "管理异常", "anomalies", "manage"),
+    ("handoffs.issue", "颁发轮换二维码凭证", "handoffs", "issue"),
+    ("handoffs.receive", "扫码接收批次", "handoffs", "receive"),
+    ("handoffs.read", "查看凭证与交接轨迹", "handoffs", "read"),
+    ("handoffs.revoke", "撤销二维码凭证", "handoffs", "revoke"),
 ]
 
 
@@ -432,10 +507,11 @@ def init_db() -> None:
             "sample_manager": [
                 "samples.read", "samples.write", "samples.consume", "samples.destroy",
                 "loans.manage", "inventory.manage", "anomalies.manage",
+                "handoffs.issue", "handoffs.receive", "handoffs.read", "handoffs.revoke",
             ],
             "researcher": ["samples.read", "samples.consume"],
             "approver": ["samples.read", "approvals.decide"],
-            "auditor": ["samples.read", "audit.read"],
+            "auditor": ["samples.read", "audit.read", "handoffs.read"],
         }
         for role_code, permission_codes in role_permissions.items():
             role_id = connection.execute("SELECT id FROM roles WHERE code=?", (role_code,)).fetchone()[0]

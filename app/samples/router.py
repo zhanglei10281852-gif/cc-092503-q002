@@ -39,6 +39,12 @@ def create_batch(payload: BatchCreate, principal: Principal = Depends(current_pr
         return SampleLifecycleService(connection).create_batch(principal, payload.model_dump())
 
 
+@router.post("/batches/{batch_id}/close")
+def close_batch(batch_id: int, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return SampleLifecycleService(connection).close_batch(principal, batch_id)
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_sample(payload: SampleCreate, principal: Principal = Depends(current_principal)):
     with transaction(immediate=True) as connection:
