@@ -335,6 +335,68 @@ CREATE TABLE IF NOT EXISTS sample_events (
     occurred_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sample_events_sample ON sample_events(sample_id, id);
+
+CREATE TABLE IF NOT EXISTS handover_credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_code TEXT NOT NULL UNIQUE,
+    batch_id INTEGER NOT NULL REFERENCES receipt_batches(id),
+    version INTEGER NOT NULL CHECK(version >= 1),
+    from_party TEXT NOT NULL,
+    from_party_contact TEXT NOT NULL DEFAULT '',
+    to_party TEXT NOT NULL DEFAULT '',
+    secret_digest TEXT NOT NULL UNIQUE,
+    secret_hint TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK(status IN ('active','superseded','revoked','consumed')),
+    issued_by INTEGER NOT NULL REFERENCES users(id),
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    rotated_from_id INTEGER REFERENCES handover_credentials(id),
+    revoked_by INTEGER REFERENCES users(id),
+    revoked_at TEXT,
+    revoke_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(batch_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_handover_cred_batch ON handover_credentials(batch_id, version);
+
+CREATE TABLE IF NOT EXISTS handover_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_code TEXT NOT NULL UNIQUE,
+    credential_id INTEGER NOT NULL UNIQUE REFERENCES handover_credentials(id),
+    batch_id INTEGER NOT NULL REFERENCES receipt_batches(id),
+    credential_version INTEGER NOT NULL,
+    from_party TEXT NOT NULL,
+    to_party TEXT NOT NULL,
+    expected_count INTEGER NOT NULL CHECK(expected_count >= 0),
+    accepted_count INTEGER NOT NULL CHECK(accepted_count >= 0),
+    rejected_count INTEGER NOT NULL CHECK(rejected_count >= 0),
+    reject_reasons_json TEXT NOT NULL DEFAULT '[]',
+    location_id INTEGER REFERENCES storage_locations(id),
+    received_by INTEGER NOT NULL REFERENCES users(id),
+    custodian_user_id INTEGER REFERENCES users(id),
+    note TEXT NOT NULL DEFAULT '',
+    payload_digest TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    CHECK(accepted_count + rejected_count > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_handover_receipt_batch ON handover_receipts(batch_id);
+
+CREATE TABLE IF NOT EXISTS handover_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER REFERENCES handover_credentials(id),
+    batch_id INTEGER REFERENCES receipt_batches(id),
+    receipt_id INTEGER REFERENCES handover_receipts(id),
+    actor_user_id INTEGER REFERENCES users(id),
+    actor_name TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    result TEXT NOT NULL CHECK(result IN ('success','rejected')),
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handover_events_cred ON handover_events(credential_id, id);
+CREATE INDEX IF NOT EXISTS idx_handover_events_batch ON handover_events(batch_id, id);
 """
 
 PERMISSIONS = [
@@ -353,6 +415,9 @@ PERMISSIONS = [
     ("approvals.decide", "审批高风险操作", "approvals", "decide"),
     ("locations.read_sensitive", "查看精确保管位置", "locations", "read_sensitive"),
     ("anomalies.manage", "管理异常", "anomalies", "manage"),
+    ("handovers.issue", "发放与轮换交接凭证", "handover", "issue"),
+    ("handovers.receive", "扫码接收入库", "handover", "receive"),
+    ("handovers.trail", "查看交接凭证完整使用轨迹", "handover", "trail"),
 ]
 
 
@@ -432,6 +497,7 @@ def init_db() -> None:
             "sample_manager": [
                 "samples.read", "samples.write", "samples.consume", "samples.destroy",
                 "loans.manage", "inventory.manage", "anomalies.manage",
+                "handovers.issue", "handovers.receive",
             ],
             "researcher": ["samples.read", "samples.consume"],
             "approver": ["samples.read", "approvals.decide"],
